@@ -31,6 +31,22 @@
 
 ---
 
+## 스크린샷
+
+### 웹 UI (컴퓨존 브랜딩)
+
+![메인 UI](./docs/screenshots/main-ui.png)
+
+상단에 컴퓨존 로고, 한글 메뉴 (설정 · 키보드 · Power · 터미널 · 가상 키보드 · 매크로), 하단 상태바 한글화.
+
+### OTA 업데이트 다이얼로그
+
+![업데이트 다이얼로그](./docs/screenshots/update-dialog.png)
+
+`HoMongYi/compuzone-kvm` 릴리스에서 새 버전을 확인하고 한 번의 클릭으로 설치.
+
+---
+
 ## 하드웨어
 
 | 항목 | 사양 |
