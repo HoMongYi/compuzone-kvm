@@ -1,0 +1,20 @@
+#!/bin/sh
+# Boot splash: paint Compuzone logo to /dev/fb0 (ST7789V, 240x240 RGB565LE)
+# right after fb device is up, before kvm_display takes over.
+
+LOGO=/userdata/picokvm/bootlogo.raw
+FB=/dev/fb0
+
+start() {
+    [ -e "${FB}" ] || return 0
+    [ -f "${LOGO}" ] || return 0
+    cat "${LOGO}" > "${FB}" 2>/dev/null
+}
+
+case "$1" in
+    start) start ;;
+    stop)  : ;;
+    *)     start ;;
+esac
+
+exit 0

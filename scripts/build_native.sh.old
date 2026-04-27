@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Build jetkvm_native with custom Compuzone logo embedded.
+# Run inside WSL Ubuntu (or any Ubuntu 22.04+ environment).
+#
+# Usage:
+#   bash scripts/build_native.sh /mnt/d/path/to/compuzone-logo-153x42.png
+#
+# Output:
+#   resource/jetkvm_native           (new binary)
+#   resource/jetkvm_native.sha256    (updated checksum)
+
+set -euo pipefail
+
+LOGO_PNG="${1:-}"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK_DIR="${PROJECT_ROOT}/.build-native"
+NATIVE_REPO="${WORK_DIR}/jetkvm-native"
+BUILDKIT_DIR="/opt/jetkvm-native-buildkit"
+BUILDKIT_VERSION="v0.2.5"
+BUILDKIT_URL="https://github.com/jetkvm/rv1106-system/releases/download/${BUILDKIT_VERSION}/buildkit.tar.zst"
+
+# Boot logo target dimensions (defined in ui_img_1796371062.c)
+LOGO_WIDTH=153
+LOGO_HEIGHT=42
+LOGO_VAR_NAME="ui_img_1796371062"
+LOGO_TARGET_FILE="ui/${LOGO_VAR_NAME}.c"
+
+color_red()   { printf '\033[0;31m%s\033[0m\n' "$*"; }
+color_green() { printf '\033[0;32m%s\033[0m\n' "$*"; }
+color_cyan()  { printf '\033[0;36m%s\033[0m\n' "$*"; }
+step() { echo; color_cyan "==> $*"; }
+fail() { color_red "ERROR: $*" >&2; exit 1; }
+
+# --- Validate args ---
+if [[ -z "${LOGO_PNG}" ]]; then
+    fail "Usage: $0 <path-to-logo.png>
+       Logo must be a PNG with alpha channel.
+       Recommended size: ${LOGO_WIDTH}x${LOGO_HEIGHT} (any size works, will be resized)."
+fi
+if [[ ! -f "${LOGO_PNG}" ]]; then
+    fail "Logo file not found: ${LOGO_PNG}"
+fi
+
+# --- Validate environment ---
+step "Checking environment"
+if [[ "$(uname -s)" != "Linux" ]]; then
+    fail "This script must run on Linux (use WSL Ubuntu on Windows)."
+fi
+command -v sudo >/dev/null || fail "sudo is required"
+command -v git  >/dev/null || fail "git is required"
+
+# --- Install dependencies (idempotent) ---
+step "Installing build dependencies (sudo password may be required)"
+sudo apt-get update -qq
+sudo apt-get install -y --no-install-recommends \
+    build-essential device-tree-compiler \
+    gperf g++-multilib gcc-multilib \
+    libnl-3-dev libdbus-1-dev libelf-dev libmpc-dev dwarves \
+    bc openssl flex bison libssl-dev python3 python-is-python3 \
+    texinfo kmod cmake \
+    wget zstd ca-certificates \
+    nodejs npm \
+    imagemagick librsvg2-bin \
+    libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev libpixman-1-dev librsvg2-dev pkg-config
+
+# --- Download Rockchip buildkit (~ several hundred MB, only once) ---
+if [[ ! -d "${BUILDKIT_DIR}/tools" ]]; then
+    step "Downloading Rockchip buildkit ${BUILDKIT_VERSION} (large, one-time)"
+    sudo mkdir -p "${BUILDKIT_DIR}"
+    TMP_TAR="$(mktemp --suffix=.tar.zst)"
+    wget -O "${TMP_TAR}" "${BUILDKIT_URL}"
+    sudo tar --use-compress-program="unzstd --long=31" -xf "${TMP_TAR}" -C "${BUILDKIT_DIR}"
+    rm -f "${TMP_TAR}"
+else
+    color_green "Buildkit already present at ${BUILDKIT_DIR}"
+fi
+
+# --- Clone or update jetkvm-native ---
+mkdir -p "${WORK_DIR}"
+if [[ ! -d "${NATIVE_REPO}/.git" ]]; then
+    step "Cloning jetkvm-native"
+    git clone --recursive https://github.com/jetkvm/jetkvm-native "${NATIVE_REPO}"
+else
+    step "Updating jetkvm-native"
+    git -C "${NATIVE_REPO}" pull --ff-only
+    git -C "${NATIVE_REPO}" submodule update --init --recursive
+fi
+
+# --- Install lv_img_conv (LVGL image converter) ---
+LV_CONV="${WORK_DIR}/node_modules/.bin/lv_img_conv"
+SWC_CORE="${WORK_DIR}/node_modules/@swc/core"
+if [[ ! -x "${LV_CONV}" ]] || [[ ! -d "${SWC_CORE}" ]]; then
+    step "Installing lv_img_conv (LVGL PNG → C array converter)"
+    pushd "${WORK_DIR}" >/dev/null
+    # npm rejects package names starting with '.', so write package.json manually
+    cat > package.json <<'JSON'
+{
+  "name": "build-native-tools",
+  "version": "1.0.0",
+  "private": true
+}
+JSON
+    # Clean up any partial install from prior failed runs
+    rm -rf node_modules package-lock.json
+    npm install --no-fund --no-audit lv_img_conv ts-node typescript @swc/core
+    popd >/dev/null
+fi
+
+# --- Resize logo to target dimensions if needed ---
+RESIZED_PNG="${WORK_DIR}/compuzone-logo-${LOGO_WIDTH}x${LOGO_HEIGHT}.png"
+step "Preparing logo image (${LOGO_WIDTH}x${LOGO_HEIGHT})"
+# ImageMagick: keep aspect ratio, pad with transparent if needed
+convert "${LOGO_PNG}" \
+    -resize "${LOGO_WIDTH}x${LOGO_HEIGHT}" \
+    -background none -gravity center \
+    -extent "${LOGO_WIDTH}x${LOGO_HEIGHT}" \
+    "PNG32:${RESIZED_PNG}"
+color_green "Resized logo: ${RESIZED_PNG}"
+
+# --- Convert PNG to LVGL C array, replacing the boot logo ---
+step "Converting PNG to LVGL C array (TRUE_COLOR_ALPHA)"
+TARGET_FILE="${NATIVE_REPO}/${LOGO_TARGET_FILE}"
+[[ -f "${TARGET_FILE}" ]] || fail "Target file not found: ${TARGET_FILE}"
+
+# Backup original once
+[[ -f "${TARGET_FILE}.orig" ]] || cp "${TARGET_FILE}" "${TARGET_FILE}.orig"
+
+# lv_img_conv supports CF_TRUE_COLOR_ALPHA for LVGL 8.x
+"${LV_CONV}" \
+    --output-file "${TARGET_FILE}" \
+    --image-name "${LOGO_VAR_NAME}" \
+    --color-format CF_TRUE_COLOR_ALPHA \
+    --output-format c \
+    --force \
+    "${RESIZED_PNG}"
+color_green "Replaced ${LOGO_TARGET_FILE} with new logo data"
+
+# --- Build jetkvm-native ---
+step "Building jetkvm-native (this may take a few minutes the first time)"
+pushd "${NATIVE_REPO}" >/dev/null
+make -j"$(nproc)"
+popd >/dev/null
+
+# --- Locate the output binary ---
+NATIVE_BIN=""
+for candidate in \
+    "${NATIVE_REPO}/build/bin/jetkvm_native" \
+    "${NATIVE_REPO}/build/jetkvm_native" \
+    "${NATIVE_REPO}/jetkvm_native" \
+    "${NATIVE_REPO}/bin/jetkvm_native"; do
+    if [[ -x "${candidate}" ]]; then NATIVE_BIN="${candidate}"; break; fi
+done
+[[ -n "${NATIVE_BIN}" ]] || fail "Built binary not found. Inspect ${NATIVE_REPO} for the output."
+
+# --- Copy into compuzone-kvm/resource/ and update SHA256 ---
+step "Updating resource/jetkvm_native"
+cp "${NATIVE_BIN}" "${PROJECT_ROOT}/resource/jetkvm_native"
+chmod +x "${PROJECT_ROOT}/resource/jetkvm_native"
+( cd "${PROJECT_ROOT}/resource" && sha256sum jetkvm_native | awk '{print $1}' > jetkvm_native.sha256 )
+
+SIZE_KB=$(( $(stat -c%s "${PROJECT_ROOT}/resource/jetkvm_native") / 1024 ))
+color_green "Done. resource/jetkvm_native (${SIZE_KB} KB)"
+color_green "SHA256: $(cat "${PROJECT_ROOT}/resource/jetkvm_native.sha256")"
+
+cat <<'EOF'
+
+Next steps:
+  1. Build kvm_app (it will embed the new jetkvm_native):
+       From Windows PowerShell at the repo root:
+         .\scripts\deploy.ps1 -DeviceIp <KVM_IP>
+     This will rebuild kvm_app and SCP it to the device.
+
+  2. After deploy, restart the device or run on it:
+       /etc/init.d/S99kvm restart
+     (or whatever the service name is on your build).
+EOF

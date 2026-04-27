@@ -1,0 +1,33 @@
+bin/*
+static/*
+.build-native/
+
+# Secrets / local-only configs (never commit)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+authorized_keys
+known_hosts
+
+# Device runtime artifacts (if ever copied locally for debugging)
+kvm_config.json
+config.json
+hashedPassword*
+.idea
+.DS_Store
+.vscode
+package-lock.json
+package.json
+node_modules/
+ui/.i18n_extractor.json
+
+device-tests.tar.gz
